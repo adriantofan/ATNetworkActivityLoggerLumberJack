@@ -1,4 +1,4 @@
-// AFNetworkActivityLogger.h
+// ATNetworkActivityLoggerLumberJack.h
 //
 // Copyright (c) 2013 AFNetworking (http://afnetworking.com/)
 //
@@ -20,9 +20,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#import "AFNetworkActivityLogger.h"
+#import "ATNetworkActivityLoggerLumberJack.h"
 #import "AFURLConnectionOperation.h"
 #import "AFURLSessionManager.h"
+
+static DDLogLevel __unused ddLogLevel = DDLogLevelAll;
 
 #import <objc/runtime.h>
 
@@ -55,10 +57,10 @@ static NSError * AFNetworkErrorFromNotification(NSNotification *notification) {
     return error;
 }
 
-@implementation AFNetworkActivityLogger
+@implementation ATNetworkActivityLoggerLumberJack
 
 + (instancetype)sharedLogger {
-    static AFNetworkActivityLogger *_sharedLogger = nil;
+    static ATNetworkActivityLoggerLumberJack *_sharedLogger = nil;
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -74,13 +76,21 @@ static NSError * AFNetworkErrorFromNotification(NSNotification *notification) {
         return nil;
     }
 
-    self.level = AFLoggerLevelInfo;
+    self.ddLogLevel = DDLogLevelAll;
 
     return self;
 }
 
 - (void)dealloc {
     [self stopLogging];
+}
+
+-(void)setDdLogLevel:(DDLogLevel)logLevel{
+  ddLogLevel = logLevel;
+}
+
+-(DDLogLevel)ddLogLevel {
+  return ddLogLevel;
 }
 
 - (void)startLogging {
@@ -121,12 +131,12 @@ static void * AFNetworkRequestStartDate = &AFNetworkRequestStartDate;
         body = [[NSString alloc] initWithData:[request HTTPBody] encoding:NSUTF8StringEncoding];
     }
 
-    switch (self.level) {
-        case AFLoggerLevelDebug:
-            NSLog(@"%@ '%@': %@ %@", [request HTTPMethod], [[request URL] absoluteString], [request allHTTPHeaderFields], body);
+    switch (self.ddLogLevel) {
+        case DDLogLevelDebug:
+            DDLogDebug(@"%@ '%@': %@ %@", [request HTTPMethod], [[request URL] absoluteString], [request allHTTPHeaderFields], [self.class bodyToPrintForRequest:request]);
             break;
-        case AFLoggerLevelInfo:
-            NSLog(@"%@ '%@'", [request HTTPMethod], [[request URL] absoluteString]);
+        case DDLogLevelInfo:
+            DDLogInfo(@"%@ '%@'", [request HTTPMethod], [[request URL] absoluteString]);
             break;
         default:
             break;
@@ -161,29 +171,91 @@ static void * AFNetworkRequestStartDate = &AFNetworkRequestStartDate;
     }
 
     NSTimeInterval elapsedTime = [[NSDate date] timeIntervalSinceDate:objc_getAssociatedObject(notification.object, AFNetworkRequestStartDate)];
+    id objectToPrint = [self.class objectToPrintForNotification:notification];
 
     if (error) {
-        switch (self.level) {
-            case AFLoggerLevelDebug:
-            case AFLoggerLevelInfo:
-            case AFLoggerLevelWarn:
-            case AFLoggerLevelError:
-                NSLog(@"[Error] %@ '%@' (%ld) [%.04f s]: %@", [request HTTPMethod], [[response URL] absoluteString], (long)responseStatusCode, elapsedTime, error);
+        switch (self.ddLogLevel) {
+            case DDLogLevelInfo:
+            case DDLogLevelDebug:
+            case DDLogLevelVerbose:
+            case DDLogLevelAll:
+                DDLogError(@"[Error] %@ '%@' (%ld) [%.04f s]: %@", [request HTTPMethod], [[response URL] absoluteString], (long)responseStatusCode, elapsedTime, error);
             default:
                 break;
         }
     } else {
-        switch (self.level) {
-            case AFLoggerLevelDebug:
-                NSLog(@"%ld '%@' [%.04f s]: %@ %@", (long)responseStatusCode, [[response URL] absoluteString], elapsedTime, responseHeaderFields, responseObject);
+        switch (self.ddLogLevel) {
+            case DDLogLevelDebug:
+                DDLogDebug(@"%ld '%@' [%.04f s]: %@ %@", (long)responseStatusCode, [[response URL] absoluteString], elapsedTime, responseHeaderFields, objectToPrint);
                 break;
-            case AFLoggerLevelInfo:
-                NSLog(@"%ld '%@' [%.04f s]", (long)responseStatusCode, [[response URL] absoluteString], elapsedTime);
+            case DDLogLevelInfo:
+                DDLogInfo(@"%ld '%@' [%.04f s]", (long)responseStatusCode, [[response URL] absoluteString], elapsedTime);
                 break;
             default:
                 break;
         }
     }
 }
+
+#pragma mark - Object to print
++ (id)bodyToPrintForRequest:(NSURLRequest *)request {
+    id body = nil;
+    
+    if ([request HTTPBody]) {
+        // Parse the body as a string
+        NSString *queryString = [[NSString alloc] initWithData:[request HTTPBody] encoding:NSUTF8StringEncoding];
+        
+        // Parse a queryStringPairs from the http body
+        NSArray *queryStringPairs = [queryString componentsSeparatedByString:@"&"];
+        
+        // Init queryStringPairsDictionary if needed
+        NSMutableDictionary *queryStringPairsDictionary = (queryStringPairs.count) ? [[NSMutableDictionary alloc] init] : nil;
+        
+        // Decode URL-encoded query pairs
+        for (NSString *queryStringPair in queryStringPairs) {
+            NSArray *components = [queryStringPair componentsSeparatedByString:@"="];
+            
+            if (components.count>1) {
+                id value = [[components[1]
+                             stringByReplacingOccurrencesOfString:@"+" withString:@" "]
+                            stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+                
+                NSString *key = [queryStringPair componentsSeparatedByString:@"="][0];
+                
+                [queryStringPairsDictionary setValue:value
+                                              forKey:key];
+            }
+        }
+        
+        body = (queryStringPairsDictionary.count) ? queryStringPairsDictionary : queryString;
+    }
+    
+    return body;
+}
+
+
++ (id)objectToPrintForNotification:(NSNotification *)notification {
+    // Object to be returned
+    id objectToPrint = nil;
+    
+    // Get the serialized response and return it if it's not nil.
+    objectToPrint = notification.userInfo[AFNetworkingTaskDidCompleteSerializedResponseKey];
+    if (objectToPrint && ! [objectToPrint isKindOfClass:[NSNull class]])
+        return objectToPrint;
+    
+    // Fallback with responseObject or- responseString
+    id operation = notification.object;
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wundeclared-selector"
+    if ([operation respondsToSelector:@selector(responseObject)])
+        objectToPrint = [operation performSelector:@selector(responseObject)];
+# pragma clang diagnostic pop
+    
+    else if ([operation respondsToSelector:@selector(responseString)])
+        objectToPrint = [operation performSelector:@selector(responseString)];
+    
+    return objectToPrint;
+}
+
 
 @end
